@@ -62,6 +62,11 @@ class ParsePipelineOrchestrator:
         self.transform = TransformStage()
         self.templates = TemplateVersionManager()
         self.review = ReviewMetricEngine()
+        # 结构复核包交接是服务层状态能力，这里挂共享单例，保证编排器与 HTTP/测试看到同一份数据。
+        from app.services.schema_review_pack import review_pack_service
+        self.review_pack = review_pack_service
+        self.review_packs = review_pack_service
+        self.schema_review = review_pack_service
         self.audit_log: list[dict[str, Any]] = []
         self._run_id = 0
 
@@ -659,6 +664,89 @@ class ParsePipelineOrchestrator:
                 "fallback_count": decision.fallback_count,
                 "success_rows": success,
                 "message": msg}
+
+    # ------------------------------------------------------------------
+    # 链路11：结构复核包导出→补段/新规则→回填判读（唯一有效）→字段解析消费
+    # ------------------------------------------------------------------
+    def link11_schema_review_handoff(self, **kwargs: Any) -> dict[str, Any]:
+        """贯通结构复核交接场景的便捷编排。
+
+        支持关键字：pack_no/batch_id/sample_lines/suspicious_rows/rule_no/
+        late_segment/activate_rule/judgment/repeat/cross_batch_id/parse。
+        缺省值直接对应「ID 表头 + A8 首条数据」的验收故事。
+        """
+        svc = self.review_pack
+        pack_no = str(kwargs.get("pack_no") or kwargs.get("review_pack_no") or "SRP-LINK11")
+        batch_id = str(kwargs.get("batch_id") or kwargs.get("intake_batch") or "FI-LINK11")
+        sample_lines = kwargs.get("sample_lines") or kwargs.get("raw_lines") or [
+            "ID,label,measure", "A8,alpha-8,12.5", "A9,alpha-9,13.25"]
+        suspicious = kwargs.get("suspicious_rows") or kwargs.get("selected_lines") or [2]
+        ok, msg, pack = svc.export_review_pack(
+            pack_no=pack_no, intake_batch=batch_id,
+            suspicious_rows=suspicious, sample_lines=sample_lines,
+            rule_no=kwargs.get("rule_no") or "DR-001")
+        result: dict[str, Any] = {"link": "schema-review-handoff", "ok": ok,
+                                  "message": msg, "pack_no": pack_no}
+        if not ok:
+            return result
+
+        late_segment = kwargs.get("late_segment")
+        if late_segment:
+            svc.append_segment(batch=batch_id, lines=late_segment)
+        if kwargs.get("activate_rule"):
+            svc.activate_new_rule(str(kwargs["activate_rule"]))
+
+        judgment = kwargs.get("judgment") if isinstance(kwargs.get("judgment"), dict) else {}
+        if kwargs.get("backfill", True) is not False:
+            jbody = {
+                "reviewer": kwargs.get("reviewer", "successor-shift"),
+                "actual_first_field": kwargs.get("actual_first_field", "ID"),
+                "first_row_is_header": kwargs.get("first_row_is_header", True),
+                "start_row": kwargs.get("start_row", 2),
+                "evidence_line": kwargs.get("evidence_line", 2),
+            }
+            jbody.update(judgment or {})
+            jok, jmsg, jrow = svc.submit_judgment(pack_no=pack_no, **jbody)
+            result.update(judgment_ok=jok, judgment_message=jmsg,
+                          judgment_no=(jrow or {}).get("判读编号"))
+            if not jok:
+                result["ok"] = False
+                result["stage"] = "schema_review_judgment"
+                return result
+
+        if kwargs.get("repeat"):
+            rok, rmsg, _ = svc.submit_judgment(pack_no=pack_no, reviewer="forwarded-copy")
+            result.update(duplicate_ok=rok, duplicate_rejected=not rok,
+                          duplicate_message=rmsg)
+
+        cross_batch_id = kwargs.get("cross_batch_id")
+        if cross_batch_id:
+            cok, cmsg, _ = svc.submit_judgment(pack_no=pack_no, batch=cross_batch_id,
+                                               reviewer="borrower")
+            result.update(cross_batch_ok=cok, cross_batch_rejected=not cok,
+                          cross_batch_message=cmsg)
+
+        if kwargs.get("parse", True) is not False:
+            pok, pmsg, presult = svc.parse_with_judgment(pack_no=pack_no)
+            result.update(parse_ok=pok, parse_message=pmsg)
+            if presult:
+                result.update({
+                    "approved_start_row": presult.get("approved_start_row"),
+                    "parsed_row_numbers": presult.get("parsed_line_numbers"),
+                    "judgment_no": presult.get("judgment_no"),
+                    "ledger_batch_no": presult.get("ledger_batch_no"),
+                    "first_field": presult.get("first_field"),
+                })
+                evidence = svc.evidence_for_line(
+                    batch_id, int(kwargs.get("evidence_line", 2)))
+                result["evidence"] = evidence
+        result["ok"] = bool(
+            ok
+            and result.get("judgment_ok", True)
+            and result.get("parse_ok", True))
+        self._log("schema-review-handoff", "schema_review_pack",
+                  f"pack={pack_no} start={result.get('approved_start_row')}")
+        return result
 
     # ------------------------------------------------------------------
     def status_report(self) -> dict[str, Any]:

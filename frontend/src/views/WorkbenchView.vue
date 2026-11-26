@@ -15,6 +15,11 @@
       </div>
     </header>
 
+    <SchemaReviewPanel
+      v-if="meta.key === 'schema_sniff' || meta.key === 'schema_review_pack'"
+      ref="reviewPanelRef"
+    />
+
     <div class="stat-row">
       <article v-for="item in stats" :key="item.label" class="stat-card">
         <span class="stat-label">{{ item.label }}</span>
@@ -104,9 +109,11 @@ import {
   runAction as applyAction,
 } from '@/api/backend-service'
 import type { EntryRow } from '@/data/types'
+import SchemaReviewPanel from '@/components/SchemaReviewPanel.vue'
 
 const props = defineProps<{ moduleKey: string }>()
 const meta = moduleMeta(props.moduleKey)
+const reviewPanelRef = ref<InstanceType<typeof SchemaReviewPanel> | null>(null)
 const rows = ref<EntryRow[]>([])
 const total = ref(0)
 const errorMessage = ref('')
@@ -158,6 +165,9 @@ async function submitCreate() {
     if (!result.ok) throw new Error(result.message)
     showCreate.value = false
     await reload()
+    if (meta.key === 'schema_review_pack') {
+      await reviewPanelRef.value?.refresh?.()
+    }
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '登记失败'
   } finally {
@@ -167,6 +177,23 @@ async function submitCreate() {
 
 async function runAction(action: string, row: EntryRow) {
   errorMessage.value = ''
+  // 结构复核包模块的交接类动作交给面板（打开回填页/已有判读），不走通用状态流转。
+  const handoffActions = ['回填判读', '提交判读', '打开已有判读', '发起解析', '下载复核包']
+  if (
+    (meta.key === 'schema_review_pack' || meta.key === 'schema_sniff')
+    && handoffActions.includes(action)
+    && reviewPanelRef.value
+  ) {
+    const packNo = String(row['复核包编号'] ?? '')
+    if (packNo) {
+      if (action === '打开已有判读') {
+        await reviewPanelRef.value.openExisting(packNo)
+      } else {
+        await reviewPanelRef.value.openPack(packNo, action === '回填判读' || action === '提交判读' ? 'backfill' : action)
+      }
+      return
+    }
+  }
   try {
     const result = await applyAction(meta.key, Number(row.id), action)
     if (!result.ok) throw new Error(result.message)

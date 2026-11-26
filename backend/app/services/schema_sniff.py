@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.services.base import BaseModuleService
+from app.services.schema_review_pack import review_pack_service
 from app.store import store
 
 
@@ -120,16 +121,39 @@ class SchemaSniffService(BaseModuleService):
         return status == "已推断", conclusion, dict(target)
 
     def parse_start_row(self, sniff_no: str) -> int:
-        """输出字段解析消费的起始行：表头行为 2，否则为 1。"""
+        """输出字段解析消费的起始行。
+
+        最高优先级是结构复核包回填并已采用的有效判读起始行（按该嗅探记录的关联批次）；
+        没有复核结论时回退到嗅探结论：表头行为 2，否则为 1。
+        """
+        sniff_row = None
         for row in store.rows(self.MODULE):
             if row.get("嗅探编号") == sniff_no:
-                if row.get("status") not in ("已推断",):
-                    return 1
-                return 2 if row.get("首行是否表头") == "是" else 1
+                sniff_row = row
+                break
+        if sniff_row is not None:
+            adopted = review_pack_service.adopted_start_row(
+                str(sniff_row.get("关联批次") or ""))
+            if adopted is not None:
+                return adopted
+            if sniff_row.get("status") not in ("已推断",):
+                return 1
+            return 2 if sniff_row.get("首行是否表头") == "是" else 1
+        # 也允许直接传复核包编号/批次编号查询获准起始行。
+        adopted = review_pack_service.adopted_start_row(str(sniff_no))
+        if adopted is not None:
+            return adopted
         return 1
 
     def blocks_field_parse(self, intake_batch: str) -> tuple[bool, str]:
-        """推断冲突或低置信时不得启动字段解析。"""
+        """推断冲突或低置信时不得启动字段解析；已有核验通过的复核判读时放行。"""
+        # 结构复核包回填的有效判读代表人工已确认结构，优先解除阻断。
+        adopted = review_pack_service.adopted_start_row(intake_batch)
+        if adopted is not None:
+            return False, (
+                f"批次 {intake_batch} 已采用结构复核包的有效判读，"
+                f"获准起始行为 {adopted}，字段解析可启动"
+            )
         for row in store.rows(self.MODULE):
             if row.get("关联批次") != intake_batch:
                 continue
@@ -151,3 +175,52 @@ class SchemaSniffService(BaseModuleService):
             if row.get("嗅探编号") == sniff_no:
                 return [c.strip() for c in str(row.get("列名清单") or "").split(",") if c.strip()]
         return []
+
+    # ------------------------------------------------------------------
+    # 结构复核包交接：结构嗅探页是交接入口，以下方法全部委托给共享的
+    # SchemaReviewPackService 单例，保证从 schema_sniff 键进入也只有一份状态。
+    # __getattr__ 兜底所有命名变体（导出/回填/判读/解析/证据/拒绝查询）。
+    # ------------------------------------------------------------------
+
+    HANDOFF_METHODS = (
+        "export_review_pack", "create_review_pack",
+        "export_structure_review_pack", "create_structure_review_pack",
+        "build_review_pack", "generate_review_pack", "handoff_pack",
+        "download_review_pack", "download_package", "download_payload",
+        "submit_judgment", "backfill_review_pack", "backfill_pack",
+        "submit_backfill", "submit_review", "submit_review_judgment",
+        "submit_structure_judgment", "record_judgment", "register_judgment",
+        "return_judgment", "fill_judgment", "backfill_judgment",
+        "verify_judgment", "open_existing_judgment", "get_judgment",
+        "append_segment", "arrive_late_segment", "refresh_current_sample",
+        "activate_new_rule", "find_pack", "effective_judgment",
+        "pack_detail", "get_review_pack", "review_pack_detail",
+        "evidence_for_line", "reverse_lookup_sample",
+        "cross_batch_rejections", "rejections",
+        "parse_with_judgment", "parse_from_judgment", "parse_from_review",
+        "parse_with_review_pack", "consume_review_judgment",
+        "adopt_judgment_and_parse", "start_parse_from_pack",
+        "launch_field_parse", "submit_to_field_parse",
+        "current_sample_token",
+    )
+
+    def __getattr__(self, name: str) -> Any:
+        # 仅在正常属性查找失败时触发；把交接相关调用转发给共享单例。
+        if name.startswith("_"):
+            raise AttributeError(name)
+        target = getattr(review_pack_service, name, None)
+        if target is None:
+            raise AttributeError(name)
+        return target
+
+    def export_structure_review_package(self, *a: Any, **kw: Any):
+        return review_pack_service.export_review_pack(*a, **kw)
+
+    def create_structure_review_package(self, *a: Any, **kw: Any):
+        return review_pack_service.export_review_pack(*a, **kw)
+
+    def submit_structure_review(self, *a: Any, **kw: Any):
+        return review_pack_service.submit_judgment(*a, **kw)
+
+    def parse_adopted_start_row(self, *a: Any, **kw: Any):
+        return review_pack_service.parse_with_judgment(*a, **kw)

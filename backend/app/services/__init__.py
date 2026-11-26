@@ -11,6 +11,12 @@ from app.services.field_parse import FieldParseService
 from app.services.row_quarantine import RowQuarantineService
 from app.services.parse_batch import ParseBatchService
 from app.services.schema_sniff import SchemaSniffService
+from app.services.schema_review_pack import (
+    SchemaReviewPackService,
+    review_pack_service,
+)
+from app.services.schema_review import SchemaReviewService
+from app.services.review_pack import ReviewPackService
 from app.services.delimiter_rule import DelimiterRuleService
 from app.services.nested_flatten import NestedFlattenService
 from app.services.value_cast import ValueCastService
@@ -35,6 +41,9 @@ SERVICES: dict[str, BaseModuleService] = {
     "row_quarantine": RowQuarantineService(),
     "parse_batch": ParseBatchService(),
     "schema_sniff": SchemaSniffService(),
+    "schema_review_pack": review_pack_service,
+    "schema_review": SchemaReviewService(),
+    "review_pack": ReviewPackService(),
     "delimiter_rule": DelimiterRuleService(),
     "nested_flatten": NestedFlattenService(),
     "value_cast": ValueCastService(),
